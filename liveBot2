@@ -1,0 +1,867 @@
+import cv2
+import numpy as np
+import pyautogui
+import chess
+import chess.engine
+import time
+import tkinter as tk
+from PIL import Image, ImageTk
+import os
+import json
+
+
+# Default Configuration
+DEFAULT_CONFIG = {
+    "BOARD_REGION": [200, 224, 584, 583],  # Screen coordinates (x, y, width, height) of the chessboard
+    "USER_COLOR": "white",  # Your playing color ("white" or "black") - affects board orientation for FEN
+    "STOCKFISH_PATH": "/Applications/Stockfish.app/Contents/MacOS/Stockfish",  # Full path to Stockfish executable
+    "TEMPLATE_DIR": "ChessBot/templates",  # Base directory where piece template themes are stored
+    "MATCH_THRESHOLD": 0.8,  # Confidence threshold (0.0 to 1.0) for template matching to detect pieces
+    "calibrate_on_startup": True,  # If true, prompts for board region calibration on first run or config reset
+    "PIECE_THEME": "default_theme",  # The name of the theme directory under TEMPLATE_DIR to use for piece images
+}
+
+# Configuration file path
+CONFIG_FILE = "ChessBot/config.json" # Path to the configuration file
+
+def load_config():
+    """
+    Loads configuration from the JSON file (CONFIG_FILE).
+    If the file doesn't exist, it creates one with default settings (DEFAULT_CONFIG).
+    If the file is corrupted or causes an error during loading, it falls back to defaults
+    and attempts to save a clean default configuration.
+    Returns a dictionary containing the loaded (or default) configuration.
+    """
+    global DEFAULT_CONFIG, CONFIG_FILE # Allow modification of global config objects if needed by save_config
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                user_config = json.load(f)
+            # Update default config with user-defined values
+            config = DEFAULT_CONFIG.copy()
+            config.update(user_config)
+            # Ensure all keys from DEFAULT_CONFIG are present
+            for key, value in DEFAULT_CONFIG.items():
+                if key not in config:
+                    config[key] = value
+            return config
+        except Exception as e:
+            print(f"Error loading {CONFIG_FILE}: {e}. Using default config and saving.")
+            save_config(DEFAULT_CONFIG) # Save default if loading fails
+            return DEFAULT_CONFIG
+    else:
+        print(f"{CONFIG_FILE} not found. Creating with default values.")
+        save_config(DEFAULT_CONFIG)
+        # Print guidance message for new users
+        print("\nWelcome to ChessBot!")
+        print(f"A new configuration file has been created at: {CONFIG_FILE}")
+        print("Please review/edit it if necessary, especially the STOCKFISH_PATH.")
+        # Calibration is usually triggered by 'calibrate_on_startup': True in default config.
+        # If it's not, this message might need adjustment or be shown elsewhere.
+        if DEFAULT_CONFIG.get("calibrate_on_startup", False):
+             print("The application will now guide you through screen calibration for the board if required.")
+        return DEFAULT_CONFIG
+
+def save_config(config_data):
+    """
+    Saves the provided configuration dictionary (config_data) to the JSON file (CONFIG_FILE).
+    Creates the necessary directory structure if it doesn't exist.
+    """
+    global CONFIG_FILE # Use the global path for saving
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config_data, f, indent=4)
+        print(f"Configuration saved to {CONFIG_FILE}")
+    except Exception as e:
+        print(f"Error saving config to {CONFIG_FILE}: {e}")
+
+def calibrate_board_region():
+    """
+    Guides the user through an interactive process to select the chessboard region on screen.
+    It creates a full-screen, semi-transparent Tkinter window.
+    The user is instructed to click first the top-left corner and then the
+    bottom-right corner of the chessboard.
+    The function captures these mouse click coordinates (root window coordinates)
+    and calculates the region as (x, y, width, height).
+    Returns a tuple (x, y, width, height) or None if calibration is cancelled/incomplete.
+    """
+    # Initialize Tkinter root window for capturing clicks
+    root = tk.Tk()
+    root.attributes('-fullscreen', True)  # Make window full-screen
+    root.attributes('-alpha', 0.3)        # Make window semi-transparent
+    root.attributes('-topmost', True)     # Keep window on top of other applications
+
+    # Label to instruct the user
+    label_text = tk.StringVar()
+    label_text.set("Click the TOP-LEFT corner of the chessboard.")
+    label = tk.Label(root, textvariable=label_text, font=("Arial", 24), fg="white", bg="black")
+    label.pack(expand=True) # Center the label
+
+    coords = [] # List to store the (x, y) coordinates of the two clicks
+
+    # Event handler for mouse clicks
+    def on_click(event):
+        coords.append((event.x_root, event.y_root)) # event.x_root, event.y_root are screen coordinates
+        if len(coords) == 1: # First click (top-left)
+            label_text.set("Now click the BOTTOM-RIGHT corner of the chessboard.")
+        else: # Second click (bottom-right)
+            root.destroy() # Close the Tkinter window
+
+    root.bind("<Button-1>", on_click) # Bind left mouse click to the handler
+    root.mainloop() # Start the Tkinter event loop
+
+    # Calculate region if two clicks were captured
+    if len(coords) == 2:
+        top_left_x, top_left_y = coords[0]
+        bottom_right_x, bottom_right_y = coords[1]
+        
+        # Ensure x, y corresponds to the true top-left and width, height are positive
+        x = min(top_left_x, bottom_right_x)
+        y = min(top_left_y, bottom_right_y)
+        width = abs(bottom_right_x - top_left_x)
+        height = abs(bottom_right_y - top_left_y)
+        
+        print(f"Board region calibrated: x={x}, y={y}, width={width}, height={height}")
+        return (x, y, width, height)
+    else:
+        # If calibration was cancelled (e.g., window closed before two clicks)
+        print("Calibration cancelled or incomplete. Using previous/default region.")
+        return None
+
+# Load configuration at startup
+config = load_config()
+
+# Configuration:
+
+# Coordinates of the chess board on screen (x, y, width, height)
+# (You must calibrate these values for your display)
+# BOARD_REGION is now loaded from config and converted to tuple where needed.
+
+# Your side: if you're playing white, leave as "white"; if black, set "black"
+# USER_COLOR is now loaded from config.
+
+# Path to Stockfish engine binary
+# STOCKFISH_PATH is now loaded from config.
+
+# Directory containing your piece templates (e.g., templates/wP.png, templates/bK.png, etc.)
+# TEMPLATE_DIR is now loaded from config.
+
+# Threshold for template matching (tune as necessary)
+# MATCH_THRESHOLD is now loaded from config.
+
+# Mapping from template filenames to chess piece notation
+TEMPLATE_MAPPING = {
+    "wP_white.png": "P",
+    "wP_green.png": "P",
+    "wN_white.png": "N",
+    "wN_green.png": "N",
+    "wB_white.png": "B",
+    "wB_green.png": "B",
+    "wR_white.png": "R",
+    "wR_green.png": "R",
+    "wQ_white.png": "Q",
+    "wQ_green.png": "Q",
+    "wK_white.png": "K",
+    "wK_green.png": "K",
+    "bP_white.png": "p",
+    "bP_green.png": "p",
+    "bN_white.png": "n",
+    "bN_green.png": "n",
+    "bB_white.png": "b",
+    "bB_green.png": "b",
+    "bR_white.png": "r",
+    "bR_green.png": "r",
+    "bQ_white.png": "q",
+    "bQ_green.png": "q",
+    "bK_white.png": "k",
+    "bK_green.png": "k",
+}
+
+
+# -------------------------------
+# Helper Functions
+# -------------------------------
+
+def coords_to_algebraic(row, col):
+    """
+    Converts 0-indexed (row, col) board coordinates to algebraic chess notation.
+    The coordinate system assumes an 8x8 board where:
+    - Row 0 is rank 8 (Black's back rank if White is at bottom).
+    - Row 7 is rank 1 (White's back rank if White is at bottom).
+    - Column 0 is file 'a'.
+    - Column 7 is file 'h'.
+    Example: (5, 4) corresponds to 'e3' (rank 3, file 'e').
+             (2, 4) corresponds to 'e6' (rank 6, file 'e').
+    Args:
+        row (int): The 0-indexed row number.
+        col (int): The 0-indexed column number.
+    Returns:
+        str: The algebraic notation (e.g., "e3") or "-" if coordinates are invalid.
+    """
+    if not (0 <= row <= 7 and 0 <= col <= 7):
+        return "-" # Invalid coords
+    rank = 8 - row
+    file_char = chr(ord('a') + col)
+    return f"{file_char}{rank}"
+
+def get_en_passant_target_square(oriented_prev_board, oriented_current_board, last_mover_color_char):
+    """
+    Determines the en passant target square if a two-square pawn advance by the
+    `last_mover_color_char` has just occurred between `oriented_prev_board` and
+    `oriented_current_board`.
+    Args:
+        oriented_prev_board (list of lists): The 8x8 board state from the previous turn,
+                                             oriented with White at the bottom (row 7 = rank 1).
+        oriented_current_board (list of lists): The 8x8 board state of the current turn,
+                                                similarly oriented.
+        last_mover_color_char (str): The color of the player who made the last move ('w' or 'b').
+    Returns:
+        str: The algebraic notation of the en passant target square (e.g., "e3") if
+             a two-square pawn advance was detected; otherwise, "-".
+    """
+    if oriented_prev_board is None or oriented_current_board is None:
+        return "-"
+
+    # White pawn (P) moved two squares
+    if last_mover_color_char == 'w':
+        # White's pawns move from rank 2 (row 6) to rank 4 (row 4)
+        # En passant target square is on rank 3 (row 5)
+        for col in range(8):
+            if (oriented_prev_board[6][col] == 'P' and             # Was on starting rank (rank 2)
+                oriented_current_board[4][col] == 'P' and         # Now on rank 4
+                oriented_prev_board[5][col] == '' and             # Square in between (rank 3) was empty
+                oriented_prev_board[4][col] == '' and             # Destination square (rank 4) was empty in prev
+                oriented_current_board[6][col] == '' and          # Original square (rank 2) is now empty
+                oriented_current_board[5][col] == ''):            # En passant target square is currently empty
+                # Check if any other piece is on oriented_current_board[5][col] if needed by rules,
+                # but FEN just notes the target square.
+                return coords_to_algebraic(5, col) # Target square is on rank 3 (row 5)
+    
+    # Black pawn (p) moved two squares
+    elif last_mover_color_char == 'b':
+        # Black's pawns move from rank 7 (row 1) to rank 5 (row 3)
+        # En passant target square is on rank 6 (row 2)
+        for col in range(8):
+            if (oriented_prev_board[1][col] == 'p' and             # Was on starting rank (rank 7)
+                oriented_current_board[3][col] == 'p' and         # Now on rank 5
+                oriented_prev_board[2][col] == '' and             # Square in between (rank 6) was empty
+                oriented_prev_board[3][col] == '' and             # Destination square (rank 5) was empty in prev
+                oriented_current_board[1][col] == '' and          # Original square (rank 7) is now empty
+                oriented_current_board[2][col] == ''):            # En passant target square is currently empty
+                return coords_to_algebraic(2, col) # Target square is on rank 6 (row 2)
+                
+    return "-"
+
+def load_templates(template_dir_from_config):
+    """
+    Load template images for piece recognition from the configured theme directory.
+    It uses the `PIECE_THEME` from the global `config` to select a subdirectory
+    within `template_dir_from_config` (the base 'templates' directory path, e.g., "ChessBot/templates").
+    If the specified theme is not found, it attempts to fall back to "default_theme".
+    If "default_theme" is also missing or no templates are loaded, it returns an empty dictionary.
+    Args:
+        template_dir_from_config (str): The base path to the templates directory.
+    Returns:
+        dict: A dictionary mapping piece notations (e.g., "P", "k") to their
+              loaded grayscale template images (cv2 image objects). Returns
+              empty if loading fails.
+    """
+    global config # Access the global configuration, which contains PIECE_THEME
+    templates_loaded = {}
+    
+    piece_theme = config.get("PIECE_THEME", "default_theme")
+    theme_specific_dir = os.path.join(template_dir_from_config, piece_theme)
+
+    if not os.path.isdir(theme_specific_dir):
+        print(f"Warning: Theme directory '{theme_specific_dir}' not found.")
+        if piece_theme != "default_theme":
+            fallback_theme_dir = os.path.join(template_dir_from_config, "default_theme")
+            print(f"Attempting to fall back to 'default_theme' at '{fallback_theme_dir}'.")
+            if os.path.isdir(fallback_theme_dir):
+                theme_specific_dir = fallback_theme_dir
+            else:
+                print(f"Error: Fallback 'default_theme' directory '{fallback_theme_dir}' also not found.")
+                return templates_loaded # Return empty
+        else:
+            # If default_theme itself is missing
+            print(f"Error: Default theme directory '{theme_specific_dir}' not found.")
+            return templates_loaded # Return empty
+
+    print(f"Loading templates from theme: '{os.path.basename(theme_specific_dir)}'")
+    for filename, piece_notation in TEMPLATE_MAPPING.items():
+        path = os.path.join(theme_specific_dir, filename)
+        if os.path.exists(path):
+            img = cv2.imread(path, 0)  # load in grayscale
+            if img is None:
+                print(f"Warning: Failed to load image {path}. Check file integrity.")
+                continue
+            templates_loaded[piece_notation] = img
+        else:
+            print(f"Template not found: {path}")
+            
+    if not templates_loaded:
+        print(f"Warning: No templates were loaded from theme '{os.path.basename(theme_specific_dir)}'. Check paths and files.")
+        
+    return templates_loaded
+
+# capture_board_image() is integrated into main() to access 'config' easily
+
+def split_into_squares(board_img):
+    """
+    Divides a given board image into an 8x8 grid of individual square images.
+    Args:
+        board_img (numpy.ndarray): The image of the chessboard.
+    Returns:
+        list of lists: An 8x8 list where each element is an image (numpy.ndarray)
+                       representing a single square on the board.
+    """
+    squares = []
+    h, w, _ = board_img.shape  # Get height and width of the board image
+    square_width = w // 8      # Calculate width of a single square
+    square_height = h // 8     # Calculate height of a single square (should be ~equal to width)
+
+    for r_idx in range(8): # Iterate through rows
+        row_squares = []
+        for c_idx in range(8): # Iterate through columns
+            x = c_idx * square_width
+            y = r_idx * square_height
+            # Slice the board image to get the current square
+            square_img = board_img[y:y+square_height, x:x+square_width]
+            row_squares.append(square_img)
+        squares.append(row_squares)
+    return squares
+
+def detect_piece(square_img, templates):
+    """
+    Identifies which chess piece, if any, is present in a given square image.
+    It uses template matching against a dictionary of piece templates.
+    The piece with the highest match score above `MATCH_THRESHOLD` (from config) is returned.
+    Args:
+        square_img (numpy.ndarray): The image of a single board square.
+        templates (dict): A dictionary mapping piece notations (e.g., "P", "k")
+                          to their grayscale template images.
+    Returns:
+        str or None: The piece notation (e.g., "P", "k") if a piece is detected
+                     with sufficient confidence, otherwise None (or "" based on later logic).
+    """
+    gray_square = cv2.cvtColor(square_img, cv2.COLOR_BGR2GRAY) # Convert square to grayscale
+    best_val = 0.0 # Initialize best match score
+    detected_piece = None    # Initialize detected piece
+    
+    # Access MATCH_THRESHOLD from the global 'config' dictionary
+    match_threshold = config.get("MATCH_THRESHOLD", DEFAULT_CONFIG["MATCH_THRESHOLD"])
+
+    for piece_notation, template_img in templates.items():
+        # Perform template matching using TM_CCOEFF_NORMED method
+        # This method gives a correlation score between -1 and 1. Higher is better.
+        res = cv2.matchTemplate(gray_square, template_img, cv2.TM_CCOEFF_NORMED)
+        _min_val, max_val, _min_loc, _max_loc = cv2.minMaxLoc(res) # Get the maximum correlation score
+
+        # If this match is better than previous ones and above threshold
+        if max_val > best_val and max_val >= match_threshold:
+            best_val = max_val
+            detected_piece = piece_notation
+            
+    return detected_piece # Returns the piece notation string or None
+
+def detect_board_state(board_img, templates):
+    """
+    Analyzes the entire board image to determine the state (piece on each square).
+    It splits the board into squares, then uses `detect_piece` for each square.
+    Args:
+        board_img (numpy.ndarray): The image of the chessboard.
+        templates (dict): Loaded piece templates.
+    Returns:
+        list of lists: An 8x8 list representing the board, where each cell contains
+                       a piece notation string (e.g., "P", "k") or an empty string ""
+                       if the square is empty or no piece is confidently detected.
+    """
+    current_board_state = [] # Initialize the 8x8 board state list
+    # Divide the board image into 8x8 individual square images
+    square_images = split_into_squares(board_img) 
+    
+    for r_idx, row_of_square_images in enumerate(square_images):
+        board_row_state = []
+        for c_idx, individual_square_img in enumerate(row_of_square_images):
+            # Detect piece in the current square image
+            piece = detect_piece(individual_square_img, templates)
+            # Append piece notation or "" if no piece detected (detect_piece returns None)
+            board_row_state.append(piece if piece is not None else "")
+        current_board_state.append(board_row_state)
+        
+    return current_board_state
+
+def board_state_to_fen(input_board_state, user_color, current_turn_color, current_castling_rights_str, en_passant_target_square_str):
+    """
+    Converts a raw board state (from screen capture) into a Forsyth-Edwards Notation (FEN) string.
+    This involves:
+    1. Orienting the board: Ensuring the board representation has White's pieces/rank 1 at the "bottom"
+       (row 7 of the list) and Black's pieces/rank 8 at the "top" (row 0), based on `user_color`.
+    2. Updating castling rights: Calling `update_castling_rights` based on current piece positions.
+    3. Assembling the FEN string: Combining piece placements, active color (current turn),
+       updated castling rights, en passant target square, halfmove clock (0), and fullmove number (1).
+
+    Args:
+        input_board_state (list of lists): The 8x8 board state as detected from the screen.
+                                           The orientation depends on how the board appears on screen
+                                           relative to the `BOARD_REGION` capture.
+        user_color (str): The player's color ("white" or "black") from the configuration.
+                          This determines if `input_board_state` needs flipping.
+        current_turn_color (str): The current player to move ('w' or 'b').
+        current_castling_rights_str (str): The castling availability string before this move's update
+                                             (e.g., "KQkq").
+        en_passant_target_square_str (str): The en passant target square in algebraic notation
+                                             (e.g., "e3") or "-".
+    Returns:
+        tuple: (full_fen_string, updated_castling_rights_string)
+               - full_fen_string: The fully constructed FEN string.
+               - updated_castling_rights_string: The castling rights string after potential
+                                                 updates based on piece movements.
+    """
+    # Determine board orientation for FEN and castling rights check.
+    # oriented_board_state is always with white at the bottom (rank 1 = row 7 of the array).
+    if user_color.lower() == "black":
+        # If user is playing black, their pieces are at the "bottom" of the screen capture.
+        # For FEN standard (White at bottom), we need to flip the board_state.
+        oriented_board_state = [row[::-1] for row in input_board_state[::-1]]
+    else:
+        # If user is playing white, their pieces are at the "bottom" of the screen capture.
+        # This is already the standard FEN orientation.
+        # Make a copy to avoid modifying the original list structure if it's used elsewhere.
+        oriented_board_state = [row[:] for row in input_board_state]
+
+    # Update castling rights based on the piece positions in the oriented_board_state.
+    # TEMPLATE_MAPPING uses 'K', 'R' for white king/rook and 'k', 'r' for black.
+    updated_castling_str = update_castling_rights(oriented_board_state, current_castling_rights_str)
+
+    fen_rows = []
+    for row in oriented_board_state: # Iterate through the FEN-standard oriented board
+        fen_row = ""
+        empty_count = 0
+        for cell in row: # cell contains piece characters like "P", "k", or ""
+            if cell == "": # "" denotes an empty square
+                empty_count += 1
+            else:
+                if empty_count > 0:
+                    fen_row += str(empty_count)
+                    empty_count = 0
+                fen_row += cell # Add the piece character
+        if empty_count > 0:
+            fen_row += str(empty_count)
+        fen_rows.append(fen_row)
+    
+    fen_part = "/".join(fen_rows)
+    
+    # Construct the full FEN string.
+    # For now, halfmove clock 0, fullmove number 1.
+    # These could be enhanced in future updates.
+    full_fen = f"{fen_part} {current_turn_color} {updated_castling_str} {en_passant_target_square_str} 0 1"
+    
+    return full_fen, updated_castling_str
+
+def update_castling_rights(oriented_board_state, previous_castling_rights_str):
+    """
+    Updates castling rights based on king and rook positions on an `oriented_board_state`.
+    The board is oriented with White at the bottom (row 7 = rank 1).
+    Castling rights are revoked if a king or its corresponding rook is no longer
+    on its initial square. For example, if White's King ('K') is not on 'e1' (board[7][4]),
+    both 'K' (kingside) and 'Q' (queenside) rights for White are removed.
+    Args:
+        oriented_board_state (list of lists): The 8x8 board state, FEN-oriented
+                                             (White's rank 1 is row 7).
+        previous_castling_rights_str (str): The castling rights string from the
+                                             previous state (e.g., "KQkq", "Kq", "-").
+    Returns:
+        str: The updated castling rights string, sorted canonically (KQkq), or "-" if none.
+    """
+    if not oriented_board_state or len(oriented_board_state) != 8:
+        return previous_castling_rights_str # Should not happen
+
+    # Standard positions (row, col) from white's perspective (e.g., e1 is (7,4))
+    # White pieces: K (King), R (Rook)
+    # Black pieces: k (king), r (rook)
+    WK_POS = (7, 4)  # e1
+    WR_A_POS = (7, 0) # a1 (queenside)
+    WR_H_POS = (7, 7) # h1 (kingside)
+    BK_POS = (0, 4)  # e8
+    BR_A_POS = (0, 0) # a8 (queenside)
+    BR_H_POS = (0, 7) # h8 (kingside)
+
+    current_rights = list(previous_castling_rights_str) if previous_castling_rights_str != "-" else []
+    
+    # Check White King and Rooks
+    if oriented_board_state[WK_POS[0]][WK_POS[1]] != 'K':
+        if 'K' in current_rights: current_rights.remove('K')
+        if 'Q' in current_rights: current_rights.remove('Q')
+    if oriented_board_state[WR_A_POS[0]][WR_A_POS[1]] != 'R':
+        if 'Q' in current_rights: current_rights.remove('Q')
+    if oriented_board_state[WR_H_POS[0]][WR_H_POS[1]] != 'R':
+        if 'K' in current_rights: current_rights.remove('K')
+
+    # Check Black King and Rooks
+    if oriented_board_state[BK_POS[0]][BK_POS[1]] != 'k':
+        if 'k' in current_rights: current_rights.remove('k')
+        if 'q' in current_rights: current_rights.remove('q')
+    if oriented_board_state[BR_A_POS[0]][BR_A_POS[1]] != 'r':
+        if 'q' in current_rights: current_rights.remove('q')
+    if oriented_board_state[BR_H_POS[0]][BR_H_POS[1]] != 'r':
+        if 'k' in current_rights: current_rights.remove('k')
+
+    # Filter out duplicates (e.g. if 'K' was removed by both King and Rook moving)
+    # and maintain canonical order: K, Q, k, q
+    final_rights = []
+    if 'K' in current_rights: final_rights.append('K')
+    if 'Q' in current_rights: final_rights.append('Q')
+    if 'k' in current_rights: final_rights.append('k')
+    if 'q' in current_rights: final_rights.append('q')
+    
+    return "".join(final_rights) if final_rights else "-"
+
+
+def analyze_board(fen, engine, style="safe"):
+    """
+    Analyzes the given chess board position (in FEN format) using the Stockfish engine.
+    It uses Stockfish's MultiPV (multiple principal variations) mode to get several
+    top candidate moves. A simple play style heuristic ("safe", "aggressive", "tricky")
+    can be used to select a move from these candidates.
+    Args:
+        fen (str): The board position in FEN format.
+        engine (chess.engine.SimpleEngine): An initialized Stockfish engine instance.
+        style (str, optional): A play style hint:
+                               - "safe": Use the best move (Stockfish's top choice).
+                               - "aggressive": Pick the second-best move if available.
+                               - "tricky": Pick the third-best move if available.
+                               Defaults to "safe".
+    Returns:
+        tuple: (suggested_move, best_move, full_analysis_info)
+               - suggested_move (chess.Move): The move chosen based on the `style`.
+               - best_move (chess.Move): The top move recommended by Stockfish.
+               - full_analysis_info (list): A list of dictionaries from Stockfish,
+                                           each containing detailed analysis for a
+                                           candidate move (includes score, PV, etc.).
+    """
+    board = chess.Board(fen) # Create a python-chess board object from FEN
+    # Analyze the position with a short time limit and MultiPV=3 for three best moves.
+    info = engine.analyse(board, chess.engine.Limit(time=0.1), multipv=3)
+    best_move = info[0]['pv'][0]
+    if style == "aggressive" and len(info) > 1:
+        move = info[1]['pv'][0]
+    elif style == "tricky" and len(info) > 2:
+        move = info[2]['pv'][0]
+    else:
+        move = best_move
+    return move, best_move, info
+
+def detect_move_and_flip_turn(prev_board, current_board, current_turn_color_char):
+    """
+    Detects if a move was made by comparing the previous raw board state (`prev_board`)
+    to the current raw board state (`current_board`). If a move by the player whose
+    turn it was (`current_turn_color_char`) is detected, the turn is flipped.
+    This function assumes that any change on the board made by the player whose turn
+    it is constitutes their move. It identifies the piece involved by checking what appeared
+    or disappeared and verifies its color against the current player.
+    Args:
+        prev_board (list of lists): The 8x8 raw board state from the previous turn (screen-oriented).
+        current_board (list of lists): The 8x8 raw board state of the current turn (screen-oriented).
+        current_turn_color_char (str): The color of the player whose turn it was ('w' or 'b')
+                                     before this potential move.
+    Returns:
+        str: The new turn color character ('w' or 'b'). If a valid move by the
+             `current_turn_color_char` player was detected, this will be the flipped color;
+             otherwise, it remains `current_turn_color_char`.
+    """
+    if not prev_board or not isinstance(prev_board, list) or len(prev_board) != 8:
+        # Not enough info to detect a move yet, or invalid previous board
+        return current_turn_color_char
+
+    if not current_board or not isinstance(current_board, list) or len(current_board) != 8:
+        # Invalid current board
+        return current_turn_color_char # Should not happen if detect_board_state is robust
+
+    changes_detected = 0
+    # Iterate through the board to find differences
+    for r in range(8):
+        for c in range(8):
+            prev_piece = prev_board[r][c]
+            current_piece = current_board[r][c]
+
+            if prev_piece != current_piece:
+                changes_detected += 1
+                # Determine the color of the piece involved in the change
+                # This logic assumes that the piece appearing on a square or disappearing
+                # from a square is the one that moved.
+                # If a piece moved TO this square, current_piece is the mover.
+                # If a piece moved FROM this square, prev_piece is the mover.
+                
+                moved_piece_char = ""
+                if current_piece: # Piece moved to or captured on this square
+                    moved_piece_char = current_piece
+                elif prev_piece: # Piece moved from this square
+                    moved_piece_char = prev_piece
+                
+                if moved_piece_char: # Ensure we have a piece character
+                    moved_piece_color = 'w' if moved_piece_char.isupper() else 'b'
+                    
+                    # If the color of the piece that moved matches the current turn,
+                    # it's a valid move by the current player.
+                    if moved_piece_color == current_turn_color_char:
+                        print(f"Move detected by {current_turn_color_char} ({prev_piece} -> {current_piece} at {r},{c}). Flipping turn.")
+                        return 'b' if current_turn_color_char == 'w' else 'w'
+    
+    if changes_detected > 0:
+        print(f"Board changes detected, but not conclusively by {current_turn_color_char}. Turn not flipped.")
+    
+    # No move detected by the current player, or no change at all
+    return current_turn_color_char
+
+# -------------------------------
+# Overlay Window using Tkinter
+# -------------------------------
+
+class Overlay(tk.Tk):
+    """
+    A simple Tkinter window that stays on top of other windows to display
+    information from the ChessBot, such as suggested moves and board analysis.
+    """
+    def __init__(self):
+        super().__init__()
+        self.title("ChessBot Coach") # Window title
+        self.geometry("300x250")  # Initial size of the window (width x height)
+                                  # Adjusted height to better fit more information.
+        self.attributes("-topmost", True) # Ensure the window stays on top
+
+        # Label widget to display text content
+        self.label = tk.Label(self, text="Initializing ChessBot...", font=("Arial", 10), justify="left", anchor="nw")
+        self.label.pack(pady=10, padx=10, fill="both", expand=True)
+        
+        # self.after(1000, self.periodic_update) # Removed, as updates are driven by main loop now
+
+    def update_text(self, text_content):
+        """
+        Updates the text displayed in the overlay window.
+        Args:
+            text_content (str): The new text to display.
+        """
+        self.label.config(text=text_content)
+        self.update_idletasks() # Process outstanding Tkinter tasks to refresh the display
+
+    # def periodic_update(self):
+    #     # This was a placeholder and is not actively used; updates are pushed from main.
+    #     # If background tasks in overlay were needed, this could be reinstated.
+    #     self.after(1000, self.periodic_update)
+
+# -------------------------------
+# Main Loop
+# -------------------------------
+
+def main():
+    """
+    Main function to run the ChessBot.
+    Handles configuration loading, calibration, template loading, Stockfish initialization,
+    and the main loop for board monitoring and analysis.
+    """
+    # --- Configuration Loading ---
+    global config # Load and potentially update global config object
+    config = load_config() # Reload config, in case load_config modified it (e.g. by saving defaults)
+
+    # --- Initial Setup: Board Calibration ---
+    if config.get("calibrate_on_startup", False): 
+        print("Initial calibration required or 'calibrate_on_startup' is true in config.")
+        new_region = calibrate_board_region()
+        if new_region:
+            config['BOARD_REGION'] = list(new_region)
+            config['calibrate_on_startup'] = False # Set to false after successful calibration
+            save_config(config)
+            print(f"New board region {new_region} saved. 'calibrate_on_startup' set to False.")
+        else:
+            print("Calibration failed or was cancelled. Using existing or default board region.")
+            # Potentially exit or use fallback if calibration is critical and failed
+            if config.get("BOARD_REGION") == DEFAULT_CONFIG["BOARD_REGION"]:
+                print("Warning: Using default board region. Calibration is recommended.")
+    else:
+        user_input = input(f"Current board region is {config.get('BOARD_REGION')}. Recalibrate? (y/n): ").lower()
+        if user_input == 'y':
+            new_region = calibrate_board_region()
+            if new_region:
+                config['BOARD_REGION'] = list(new_region)
+                save_config(config)
+                print(f"New board region {new_region} saved.")
+            else:
+                print("Calibration failed or was cancelled.")
+
+    # --- Initial User Input: Turn and New Game ---
+    game_current_turn = ""
+    is_new_game_input = ""
+    while True:
+        user_input_combined = input("Whose turn? (w/b) New game? (y/n) [e.g., w y]: ").lower().split()
+        if len(user_input_combined) == 2:
+            game_current_turn_candidate, is_new_game_input_candidate = user_input_combined
+            if game_current_turn_candidate in ['w', 'b'] and is_new_game_input_candidate in ['y', 'n']:
+                game_current_turn = game_current_turn_candidate
+                is_new_game_input = is_new_game_input_candidate
+                break
+        print("Invalid input. Example: 'w y' for White's turn, new game. 'b n' for Black's turn, existing game.")
+
+    # --- Game State Initialization ---
+    previous_board_state = None             # For raw board state comparison (turn detection)
+    oriented_previous_board_for_ep = None # For en passant detection (FEN-oriented board)
+    current_castling_rights = "KQkq"      # Initial full castling rights
+    current_en_passant_square = "-"       # Initial en passant square
+
+    if is_new_game_input == 'y':
+        print("New game started. Resetting castling rights, EP square, and board history.")
+        current_castling_rights = "KQkq"
+        current_en_passant_square = "-"
+        previous_board_state = None
+        oriented_previous_board_for_ep = None
+    else:
+        print("Continuing existing game. Initial castling rights: KQkq (will be updated). EP: - (will be updated).")
+
+    # --- Template Loading ---
+    templates = load_templates(config.get("TEMPLATE_DIR", DEFAULT_CONFIG["TEMPLATE_DIR"]))
+    
+    # --- UI Initialization (Overlay Window) ---
+    # Initialized early to display potential errors from template/engine loading.
+    overlay = Overlay()
+
+    if not templates: # Critical check after attempting to load templates
+        error_msg_templates = (
+            f"No templates loaded. Check TEMPLATE_DIR ('{config.get('TEMPLATE_DIR', DEFAULT_CONFIG['TEMPLATE_DIR'])}') "
+            f"and PIECE_THEME ('{config.get('PIECE_THEME', 'default_theme')}') in config."
+        )
+        print(error_msg_templates)
+        print("Exiting due to template loading failure.")
+        overlay.update_text("Error: Templates not loaded.\nCheck console and config.")
+        return # Exit if templates are critical
+
+    # --- Stockfish Engine Initialization ---
+    engine = None
+    try:
+        stockfish_path = config.get("STOCKFISH_PATH", DEFAULT_CONFIG["STOCKFISH_PATH"])
+        if not os.path.exists(stockfish_path) or not os.access(stockfish_path, os.X_OK) :
+            print(f"Stockfish path not found or not executable: {stockfish_path}")
+            print("Attempting to find 'stockfish' in system PATH...")
+            try:
+                engine = chess.engine.SimpleEngine.popen_uci("stockfish")
+                print("Found 'stockfish' in PATH. Consider updating STOCKFISH_PATH in config.json to 'stockfish'.")
+            except Exception as find_e:
+                detailed_error_msg = (
+                    f"Failed to start Stockfish engine.\n"
+                    f"Attempted path: '{stockfish_path}'. Error: Not found or not executable.\n"
+                    f"Also failed to find 'stockfish' in PATH. Error: {find_e}\n"
+                    f"Please ensure Stockfish is installed and STOCKFISH_PATH in {CONFIG_FILE} is correct."
+                )
+                print(detailed_error_msg)
+                overlay.update_text("Stockfish engine error.\nCheck console and config.")
+                return 
+        else:
+            engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+        print(f"Stockfish engine initialized using: {engine.engine.process.args[0]}")
+    except Exception as e: # Catch other potential errors from popen_uci
+        detailed_error_msg = (
+            f"Failed to start Stockfish engine.\n"
+            f"Path: '{config.get('STOCKFISH_PATH', DEFAULT_CONFIG['STOCKFISH_PATH'])}'. Error: {e}\n"
+            f"Please ensure Stockfish is installed and STOCKFISH_PATH in {CONFIG_FILE} is correct."
+        )
+        print(detailed_error_msg)
+        overlay.update_text("Stockfish engine error.\nCheck console and config.")
+        return
+
+    # --- Main Analysis Loop ---
+    style = "safe" # Default play style for Stockfish analysis
+
+    try:
+        while True:
+            # 1. Capture Board Image
+            current_board_region = tuple(config.get("BOARD_REGION", DEFAULT_CONFIG["BOARD_REGION"]))
+            screenshot = pyautogui.screenshot(region=current_board_region)
+            board_img_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+            # 2. Detect Raw Board State (pieces and their positions from screen)
+            raw_current_board = detect_board_state(board_img_cv, templates)
+            
+            # 3. Determine Current Turn (handles move detection and turn flipping)
+            original_turn_before_move = game_current_turn 
+            if previous_board_state: # Can only detect move if there was a previous state
+                game_current_turn = detect_move_and_flip_turn(previous_board_state, raw_current_board, game_current_turn)
+            last_mover_color_char = original_turn_before_move # The color that made the move to current state
+
+            # 4. En Passant Detection
+            #    Requires board states to be FEN-oriented (White at bottom)
+            user_color_str = config.get("USER_COLOR", DEFAULT_CONFIG["USER_COLOR"])
+            if user_color_str.lower() == "black":
+                oriented_current_board = [row[::-1] for row in raw_current_board[::-1]]
+            else:
+                oriented_current_board = [row[:] for row in raw_current_board]
+
+            if oriented_previous_board_for_ep is not None:
+                current_en_passant_square = get_en_passant_target_square(
+                    oriented_previous_board_for_ep,
+                    oriented_current_board,
+                    last_mover_color_char 
+                )
+            else:
+                current_en_passant_square = "-" # Default if no previous state for comparison
+            
+            # 5. FEN String Generation (includes castling rights update)
+            fen, current_castling_rights = board_state_to_fen(
+                raw_current_board, 
+                user_color_str,
+                game_current_turn, # Turn *after* the detected move
+                current_castling_rights,
+                current_en_passant_square
+            )
+            print(f"Detected FEN: {fen} (Castling: {current_castling_rights}, EP: {current_en_passant_square})")
+
+            # 6. Stockfish Analysis
+            suggestion_text = "Analyzing..." # Placeholder for overlay
+            try:
+                suggested_move, best_move, analysis_info = analyze_board(fen, engine, style)
+                
+                # Format information for overlay display
+                user_color_display = config.get("USER_COLOR", "N/A").capitalize()
+                turn_display = ("White" if game_current_turn == 'w' else "Black")
+                fen_display_parts = fen.split(' ')
+                fen_board_part = fen_display_parts[0]
+                fen_details_part = " ".join(fen_display_parts[1:])
+
+                analysis_lines = []
+                for i, info_item in enumerate(analysis_info):
+                    move = info_item['pv'][0]
+                    pov_color = chess.WHITE if game_current_turn == 'w' else chess.BLACK
+                    score_obj = info_item['score'].pov(pov_color)
+                    score_str = f"Mate in {abs(score_obj.mate())}" if score_obj.is_mate() else f"CP: {score_obj.score()}"
+                    analysis_lines.append(f"  {i+1}. {move} ({score_str})")
+                analysis_section = "Analysis (Stockfish):\n" + "\n".join(analysis_lines)
+
+                suggestion_text = (
+                    f"User Color: {user_color_display}\n"
+                    f"Current Turn: {turn_display}\n"
+                    f"FEN Board: {fen_board_part}\n"
+                    f"FEN Details: {fen_details_part}\n"
+                    f"Suggested: {suggested_move}\n"
+                    f"Best (SF): {best_move}\n"
+                    f"{analysis_section}"
+                )
+            except Exception as e:
+                suggestion_text = f"Error analyzing board:\n{e}\nFEN: {fen}"
+            
+            # 7. Update Overlay
+            overlay.update_text(suggestion_text)
+            
+            # 8. Save State for Next Iteration
+            previous_board_state = [row[:] for row in raw_current_board] 
+            oriented_previous_board_for_ep = [row[:] for row in oriented_current_board]
+
+            time.sleep(1)  # Polling interval
+            overlay.update()  # Process Tkinter events
+    except KeyboardInterrupt:
+        print("Exiting...")
+    finally:
+        engine.quit()
+        overlay.destroy()
+
+if __name__ == "__main__":
+    main()
